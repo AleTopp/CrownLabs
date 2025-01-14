@@ -57,12 +57,6 @@ const (
 	NFSSecretPathKey = "path"
 	// ProvisionJobBaseImage -> Base container image for Personal Drive provision job.
 	ProvisionJobBaseImage = "busybox"
-	// ProvisionJobLabel -> Key of the label added by the Provision Job to flag the PVC.
-	ProvisionJobLabel = "mydrive-provisioning"
-	// ProvisionJobValueOk -> Value of the label added by the Provision Job to flag the PVC when everything worked fine.
-	ProvisionJobValueOk = "completed"
-	// ProvisionJobValuePending -> Value of the label added by the Provision Job to flag the PVC when it hasn't completed yet.
-	ProvisionJobValuePending = "pending"
 	// ProvisionJobMaxRetries -> Maximum number of retries for Provision jobs.
 	ProvisionJobMaxRetries = 3
 	// ProvisionJobTTLSeconds -> Seconds for Provision jobs before deletion (either failure or success).
@@ -533,10 +527,10 @@ func (r *TenantReconciler) createOrUpdateTnPersonalNFSVolume(ctx context.Context
 		}
 		klog.Infof("PVC Secret for tenant %s %s", tn.Name, pvcSecOpRes)
 
-		val, ok := pvc.Labels[ProvisionJobLabel]
-		if !ok || val != ProvisionJobValueOk {
-			chownJob := batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: pvc.Name + "-provision", Namespace: pvc.Namespace}}
+		chownJob := batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: pvc.Name + "-provision", Namespace: pvc.Namespace}}
 
+		val, found := pvc.Labels[forge.ProvisionJobLabel]
+		if !found {
 			chownJobOpRes, err := ctrl.CreateOrUpdate(ctx, r.Client, &chownJob, func() error {
 				r.updateTnProvisioningJob(&chownJob, &pvc)
 				return ctrl.SetControllerReference(tn, &chownJob, r.Scheme)
@@ -545,17 +539,22 @@ func (r *TenantReconciler) createOrUpdateTnPersonalNFSVolume(ctx context.Context
 				klog.Errorf("Unable to create or update PVC Provisioning Job for tenant %s -> %s", tn.Name, err)
 				return err
 			}
+			pvc.Labels[forge.ProvisionJobLabel] = forge.ProvisionJobValuePending
 			klog.Infof("PVC Provisioning Job for tenant %s %s", tn.Name, chownJobOpRes)
+		} else if val != forge.ProvisionJobValueOk {
+			if err := r.Update(ctx, &chownJob); err != nil {
+				klog.Errorf("PVC Provisioning Job failed to update info about Provisioning Job for tenant %s", tn.Name)
+			}
 
 			if chownJob.Status.Succeeded == 1 {
-				pvc.Labels[ProvisionJobLabel] = ProvisionJobValueOk
+				pvc.Labels[forge.ProvisionJobLabel] = forge.ProvisionJobValueOk
 				if err := r.Update(ctx, &pvc); err != nil {
 					klog.Errorf("PVC Provisioning Job failed to update PVC labels for tenant %s", tn.Name)
 				}
 
 				klog.Infof("PVC Provisioning Job completed for tenant %s", tn.Name)
 			} else if chownJob.Status.Failed == 1 {
-				klog.Errorf("PVC Provisioning Job failed for tenant %s", tn.Name)
+				klog.Warningf("PVC Provisioning Job failed for tenant %s", tn.Name)
 			}
 		}
 	} else if pvc.Status.Phase == v1.ClaimPending {
@@ -611,7 +610,6 @@ func (r *TenantReconciler) updateTnNetPolAllow(np *netv1.NetworkPolicy) {
 func (r *TenantReconciler) updateTnPersistentVolumeClaim(pvc *v1.PersistentVolumeClaim) {
 	scName := r.MyDrivePVCsStorageClassName
 	pvc.Labels = r.updateTnResourceCommonLabels(pvc.Labels)
-	pvc.Labels[ProvisionJobLabel] = ProvisionJobValuePending
 
 	pvc.Spec.AccessModes = []v1.PersistentVolumeAccessMode{v1.ReadWriteMany}
 	pvc.Spec.Resources.Requests = v1.ResourceList{v1.ResourceStorage: r.MyDrivePVCsSize}
