@@ -540,6 +540,10 @@ func (r *TenantReconciler) createOrUpdateTnPersonalNFSVolume(ctx context.Context
 				return err
 			}
 			pvc.Labels[forge.ProvisionJobLabel] = forge.ProvisionJobValuePending
+			if err := r.Update(ctx, &pvc); err != nil {
+				klog.Errorf("PVC Provisioning Job failed to update PVC labels for tenant %s", tn.Name)
+			}
+
 			klog.Infof("PVC Provisioning Job for tenant %s %s", tn.Name, chownJobOpRes)
 		} else if val != forge.ProvisionJobValueOk {
 			if err := r.Update(ctx, &chownJob); err != nil {
