@@ -44,10 +44,8 @@ const (
 // EnforceCloudInitSecret enforces the creation/update of a secret containing the cloud-init configuration,
 // based on the information retrieved for the tenant object and its associated WebDav credentials.
 func (r *InstanceReconciler) EnforceCloudInitSecret(ctx context.Context) error {
-	var nfsServerName, nfsPath string
-
 	log := ctrl.LoggerFrom(ctx)
-	env := clctx.EnvironmentFrom(ctx)
+	environment := clctx.EnvironmentFrom(ctx)
 
 	// Retrieve the public keys.
 	publicKeys, err := r.GetPublicKeys(ctx)
@@ -57,29 +55,10 @@ func (r *InstanceReconciler) EnforceCloudInitSecret(ctx context.Context) error {
 	}
 	log.V(utils.LogDebugLevel).Info("public keys correctly retrieved")
 
-	if env.MountMyDriveVolume {
-		nfsServerName, nfsPath, err = r.GetNFSSpecs(ctx)
-
-		if err != nil {
-			log.Error(err, "unable to retrieve NFS volume dns name and path")
-			return err
-		}
-	}
-
-	mountInfos := []forge.NFSVolumeMountInfo{}
-
-	if nfsServerName != "" && nfsPath != "" {
-		mountInfos = append(mountInfos, forge.MyDriveNFSVolumeMountInfo(nfsServerName, nfsPath))
-	}
-
-	for i, mount := range env.SharedVolumeMounts {
-		var shvol clv1alpha2.SharedVolume
-		if err := r.Get(ctx, forge.NamespacedNameFromMount(mount), &shvol); err != nil {
-			log.Error(err, "unable to retrieve shvol to mount")
-			return err
-		}
-
-		mountInfos = append(mountInfos, forge.ShVolNFSVolumeMountInfo(i, &shvol, mount))
+	mountInfos, errMsg, err := forge.NFSVolumeMountInfosFromEnvironment(ctx, r.Client, environment)
+	if err != nil {
+		log.Error(err, errMsg)
+		return err
 	}
 
 	userdata, err := forge.CloudInitUserData(publicKeys, mountInfos)
