@@ -17,14 +17,19 @@
 package forge
 
 import (
+	"context"
 	"fmt"
 
 	batchv1 "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clv1alpha2 "github.com/netgroup-polito/CrownLabs/operators/api/v1alpha2"
+	clctx "github.com/netgroup-polito/CrownLabs/operators/pkg/context"
 )
 
 const (
@@ -34,6 +39,13 @@ const (
 	ProvisionJobMaxRetries = 3
 	// ProvisionJobTTLSeconds -> Seconds for Provision jobs before deletion (either failure or success).
 	ProvisionJobTTLSeconds = 3600 * 24 * 7
+
+	// NFSSecretName -> NFS secret name.
+	NFSSecretName = "mydrive-info"
+	// NFSSecretServerNameKey -> NFS Server key in NFS secret.
+	NFSSecretServerNameKey = "server-name"
+	// NFSSecretPathKey -> NFS path key in NFS secret.
+	NFSSecretPathKey = "path"
 )
 
 // NFSVolumeMountInfo contains information about a volume that has to be mounted through NFS.
@@ -122,6 +134,68 @@ func NFSShVolSpec(pv *v1.PersistentVolume) (serverAddress, exportPath string) {
 	}
 
 	return
+}
+
+// getNFSSpecs extracts the NFS server name and path for the tenant's personal NFS volume,
+// required to mount the MyDrive disk of a given tenant from the associated secret.
+func getNFSSpecs(ctx context.Context, c client.Client) (nfsServerName, nfsPath string, err error) {
+	var serverNameBytes, serverPathBytes []byte
+	instance := clctx.InstanceFrom(ctx)
+	secretName := types.NamespacedName{Namespace: instance.Namespace, Name: NFSSecretName}
+
+	secret := v1.Secret{}
+	if err = c.Get(ctx, secretName, &secret); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "failed to retrieve secret", "secret", secretName)
+		return
+	}
+
+	serverNameBytes, ok := secret.Data[NFSSecretServerNameKey]
+	if !ok {
+		err = fmt.Errorf("cannot find %v key in secret", NFSSecretServerNameKey)
+		ctrl.LoggerFrom(ctx).Error(err, "failed to retrieve NFS spec from secret", "secret", secretName)
+		return
+	}
+
+	serverPathBytes, ok = secret.Data[NFSSecretPathKey]
+	if !ok {
+		err = fmt.Errorf("cannot find %v key in secret", NFSSecretPathKey)
+		ctrl.LoggerFrom(ctx).Error(err, "failed to retrieve NFS spec from secret", "secret", secretName)
+		return
+	}
+
+	return string(serverNameBytes), string(serverPathBytes), nil
+}
+
+// NFSVolumeMountInfosFromEnvironment extracts the array of NFSVolumeMountInfo from the passed environment
+// adding the MyDrive volume if needed, and setting RW permissions in case the Tenant is manager of the Workspace.
+// In case of error, the first value returned is nil, followed by error reason (string) and error.
+// TODO: use it in instctrl/cloudinit.go:60-83 and instctrl/containers.go:88-109.
+func NFSVolumeMountInfosFromEnvironment(ctx context.Context, c client.Client, env *clv1alpha2.Environment) ([]NFSVolumeMountInfo, string, error) {
+	mountInfos := []NFSVolumeMountInfo{}
+
+	if env.MountMyDriveVolume {
+		var err error
+		nfsServerName, nfsPath, err := getNFSSpecs(ctx, c)
+		if err != nil {
+			return nil, "unable to retrieve NFS specs", err
+		}
+
+		mountInfos = append(mountInfos, MyDriveNFSVolumeMountInfo(nfsServerName, nfsPath))
+	}
+
+	for i, mount := range env.SharedVolumeMounts {
+		var shvol clv1alpha2.SharedVolume
+		if err := c.Get(ctx, NamespacedNameFromMount(mount), &shvol); err != nil {
+			return nil, "unable to retrieve shvol to mount", err
+		}
+
+		//TODO: Are you a manager of the workspace?
+		// if err2 := c.Get(ctx, types.NamespacedName{})
+
+		mountInfos = append(mountInfos, ShVolNFSVolumeMountInfo(i, &shvol, mount))
+	}
+
+	return mountInfos, "", nil
 }
 
 // PVCProvisioningJobSpec forges the spec for the PVC Provisioning job.
